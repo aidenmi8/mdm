@@ -1,109 +1,84 @@
 #!/bin/bash
 
-# This script is a recreation of the functionality in bypass-mdm.sh from https://github.com/assafdori/bypass-mdm.
-# It attempts to bypass MDM enrollment on macOS in Recovery Mode.
-# WARNING: Use at your own risk. This modifies system files and could cause issues.
-# Run only in macOS Recovery Mode.
-# Backup your data first.
-# This is for educational purposes; ensure you have legal permission to bypass MDM.
+# Define color codes
+RED='\033[1;31m'
+GRN='\033[1;32m'
+BLU='\033[1;34m'
+YEL='\033[1;33m'
+PUR='\033[1;35m'
+CYAN='\033[1;36m'
+NC='\033[0m'
 
-# Function to check if running in Recovery Mode
-is_recovery() {
-    if [ "$(sw_vers -productName 2>/dev/null)" != "macOS" ] || [ -d "/System/Installation" ]; then
-        return 0
-    else
-        echo "This script must be run in Recovery Mode."
-        exit 1
-    fi
+# Function to get the system volume name
+get_system_volume() {
+    system_volume=$(diskutil info / | grep "Device Node" | awk -F': ' '{print $2}' | xargs diskutil info | grep "Volume Name" | awk -F': ' '{print $2}' | tr -d ' ')
+    echo "$system_volume"
 }
 
-# Mount the system volume
-mount_volume() {
-    echo "Mounting Macintosh HD..."
-    diskutil mount "Macintosh HD" >/dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        echo "Failed to mount Macintosh HD."
-        exit 1
-    fi
-}
+# Get the system volume name
+system_volume=$(get_system_volume)
 
-# Rename Data volume if needed
-rename_data_volume() {
-    if [ -d "/Volumes/Macintosh HD - Data" ]; then
-        echo "Renaming 'Macintosh HD - Data' to 'Data'..."
-        mv "/Volumes/Macintosh HD - Data" "/Volumes/Data"
-    fi
-}
+# Display header
+echo -e "${CYAN}Bypass MDM By Assaf Dori (assafdori.com)${NC}"
+echo ""
 
-# Create temporary admin user
-create_temp_user() {
-    local user="Apple"
-    local pass="1234"
-    local home="/Users/$user"
+# Prompt user for choice
+PS3='Please enter your choice: '
+options=("Bypass MDM from Recovery" "Reboot & Exit")
+select opt in "${options[@]}"; do
+    case $opt in
+        "Bypass MDM from Recovery")
+            # Bypass MDM from Recovery
+            echo -e "${YEL}Bypass MDM from Recovery"
+            if [ -d "/Volumes/$system_volume - Data" ]; then
+                diskutil rename "$system_volume - Data" "Data"
+            fi
 
-    echo "Creating temporary admin user: $user with password: $pass"
+            # Create Temporary User
+            echo -e "${NC}Create a Temporary User"
+            read -p "Enter Temporary Fullname (Default is 'Apple'): " realName
+            realName="${realName:=Apple}"
+            read -p "Enter Temporary Username (Default is 'Apple'): " username
+            username="${username:=Apple}"
+            read -p "Enter Temporary Password (Default is '1234'): " passw
+            passw="${passw:=1234}"
 
-    # Mount Data volume if needed
-    diskutil mount "Data" >/dev/null 2>&1
+            # Create User
+            dscl_path='/Volumes/Data/private/var/db/dslocal/nodes/Default'
+            echo -e "${GREEN}Creating Temporary User"
+            dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username"
+            dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" UserShell "/bin/zsh"
+            dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" RealName "$realName"
+            dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" UniqueID "501"
+            dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" PrimaryGroupID "20"
+            mkdir "/Volumes/Data/Users/$username"
+            dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" NFSHomeDirectory "/Users/$username"
+            dscl -f "$dscl_path" localhost -passwd "/Local/Default/Users/$username" "$passw"
+            dscl -f "$dscl_path" localhost -append "/Local/Default/Groups/admin" GroupMembership $username
 
-    local data_path="/Volumes/Data"
+            # Block MDM domains
+            echo "0.0.0.0 deviceenrollment.apple.com" >>/Volumes/"$system_volume"/etc/hosts
+            echo "0.0.0.0 mdmenrollment.apple.com" >>/Volumes/"$system_volume"/etc/hosts
+            echo "0.0.0.0 iprofiles.apple.com" >>/Volumes/"$system_volume"/etc/hosts
+            echo -e "${GRN}Successfully blocked MDM & Profile Domains"
 
-    # Create user directory
-    mkdir -p "$data_path$home"
+            # Remove configuration profiles
+            touch /Volumes/Data/private/var/db/.AppleSetupDone
+            rm -rf /Volumes/"$system_volume"/var/db/ConfigurationProfiles/Settings/.cloudConfigHasActivationRecord
+            rm -rf /Volumes/"$system_volume"/var/db/ConfigurationProfiles/Settings/.cloudConfigRecordFound
+            touch /Volumes/"$system_volume"/var/db/ConfigurationProfiles/Settings/.cloudConfigProfileInstalled
+            touch /Volumes/"$system_volume"/var/db/ConfigurationProfiles/Settings/.cloudConfigRecordNotFound
 
-    # Use dscl to create user
-    dscl -f "$data_path/var/db/dslocal/nodes/Default" localonly -create /Local/Default/Users/$user
-    dscl -f "$data_path/var/db/dslocal/nodes/Default" localonly -create /Local/Default/Users/$user UserShell /bin/zsh
-    dscl -f "$data_path/var/db/dslocal/nodes/Default" localonly -create /Local/Default/Users/$user RealName "$user"
-    dscl -f "$data_path/var/db/dslocal/nodes/Default" localonly -create /Local/Default/Users/$user UniqueID 501
-    dscl -f "$data_path/var/db/dslocal/nodes/Default" localonly -create /Local/Default/Users/$user PrimaryGroupID 20
-    dscl -f "$data_path/var/db/dslocal/nodes/Default" localonly -create /Local/Default/Users/$user NFSHomeDirectory $home
-    dscl -f "$data_path/var/db/dslocal/nodes/Default" localonly -passwd /Local/Default/Users/$user $pass
-
-    # Add to admin group
-    dscl -f "$data_path/var/db/dslocal/nodes/Default" localonly -append /Local/Default/Groups/admin GroupMembership $user
-}
-
-# Block MDM domains in /etc/hosts
-block_mdm_domains() {
-    local hosts_file="/Volumes/Macintosh HD/etc/hosts"
-    echo "Blocking MDM domains..."
-
-    cat <<EOL >> "$hosts_file"
-127.0.0.1 deviceenrollment.apple.com
-127.0.0.1 mdmenrollment.apple.com
-127.0.0.1 iprofiles.apple.com
-EOL
-}
-
-# Remove MDM profiles and create bypass flags
-remove_mdm_profiles() {
-    local config_dir="/Volumes/Macintosh HD/var/db/ConfigurationProfiles"
-
-    echo "Removing MDM configuration profiles..."
-
-    rm -rf "$config_dir/Settings"
-    touch "$config_dir/.profilesAreInstalled"
-    touch "$config_dir/Setup/.AppleSetupDone"
-    touch "$config_dir/Setup/.setupDone"
-
-    # Additional flags to bypass
-    mkdir -p "$config_dir/Store"
-    echo "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>last-gk-scan-date</key><date>2025-08-05T00:00:00Z</date></dict></plist>" > "$config_dir/Store/gk.plist"
-}
-
-# Main function
-main() {
-    is_recovery
-    mount_volume
-    rename_data_volume
-    create_temp_user
-    block_mdm_domains
-    remove_mdm_profiles
-
-    echo "MDM bypass complete. Reboot your Mac."
-    echo "After reboot, log in as the temporary user 'Apple' with password '1234'."
-    echo "Then, create a new admin account and delete the temporary one."
-}
-
-main
+            echo -e "${GRN}MDM enrollment has been bypassed!${NC}"
+            echo -e "${NC}Exit terminal and reboot your Mac.${NC}"
+            break
+            ;;
+        "Reboot & Exit")
+            # Reboot & Exit
+            echo "Rebooting..."
+            reboot
+            break
+            ;;
+        *) echo "Invalid option $REPLY" ;;
+    esac
+done
